@@ -10,4 +10,22 @@ enum
   REPORT_ID_COUNT
 };
 
+enum
+{
+  ITF_NUM_CDC = 0,
+  ITF_NUM_CDC_DATA,
+  ITF_NUM_KEYBOARD,
+  ITF_NUM_TOTAL
+};
+
+enum
+{
+  HID_INSTANCE_KEYBOARD = 0
+};
+
+enum
+{
+  CDC_INSTANCE_1 = 0,
+};
+
 #endif /* USB_DESCRIPTORS_H_ */
