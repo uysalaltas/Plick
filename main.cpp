@@ -15,6 +15,14 @@
 #include "tusb.h"
 #include "usb_descriptors.h"
 
+// TODO
+// -Create error code for sd card and print it after connection
+// -Add more HID codes
+// -Abstraction
+// -Send key combitations in boot mode when connection happens
+// -Entegrate button group
+// -Remove unnecesarry codes
+
 enum
 {
   BLINK_NOT_MOUNTED = 250,
@@ -33,7 +41,11 @@ static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
 void hid_task(void);
 void init_buttons(void);
 void sd_card_init(void);
-void initialize_sd_card(void);
+void read_sd_card(void);
+void initialize_sd_card_writing(void);
+void write_sd_card(std::string keyDatas);
+void close_sd_card(void);
+
 static void cdc_task(void);
 
 void split_data(void);
@@ -45,7 +57,8 @@ FIL fil;
 int ret;
 char buf[100] = { 0 };
 char filename[] = "data.txt";
-bool init_once = true;
+
+uint8_t receivedBuffer[64] = { 0 };
 
 std::vector<int> buttonPins{26, 27};
 std::vector<Button> buttonGroup;
@@ -58,11 +71,14 @@ int main()
   board_init();
   tusb_init();
   //tud_init(BOARD_TUD_RHPORT);
-  initialize_sd_card();
-  split_data();
-  init_buttons();
-
-  bool bootMode = gpio_get(buttonGroup[0].buttonPin);
+  
+  bool bootMode = gpio_get(buttonPins[0]);
+  if(!bootMode)
+  {
+    read_sd_card();
+    split_data();
+    init_buttons();
+  }
 
   while (1)
   {
@@ -70,24 +86,34 @@ int main()
     cdc_task();
     hid_task();
 
-    if(gpio_get(buttonGroup[0].buttonPin))
+    if(receivedBuffer[0] == 65)
     {
-      if(init_once)
+      memset(receivedBuffer, 0, sizeof(receivedBuffer));
+    }
+
+    if(bootMode)
+    {
+      if(receivedBuffer[0] != 0)
       {
-        init_once = false;
+        initialize_sd_card_writing();
+        std::string receivedStr;
+        for (int i = 0; i < sizeof(receivedBuffer); i++) 
+        {
+          receivedStr += (char)receivedBuffer[i];
+        }
+        write_sd_card(receivedStr);
+        memset(receivedBuffer, 0, sizeof(receivedBuffer));
+        printf("SUCCESFULLY PRINTED");
+        close_sd_card();
       }
     }
-    else
-    {
-
-    }    
   }
 }
 
 //--------------------------------------------------------------------+
 // SD Card 
 //--------------------------------------------------------------------+
-void initialize_sd_card(void)
+void read_sd_card(void)
 {
   // Initialize SD card
   if (!sd_init_driver()) {
@@ -125,32 +151,53 @@ void initialize_sd_card(void)
   }
 }
 
+void initialize_sd_card_writing(void)
+{
+  // Initialize SD card
+  if (!sd_init_driver()) {
+    printf("ERROR: Could not initialize SD card\r\n");
+    while (true);
+  }
+  // Mount drive
+  fr = f_mount(&fs, "0:", 1);
+  if (fr != FR_OK) {
+    printf("ERROR: Could not mount filesystem (%d)\r\n", fr);
+    while (true);
+  }
+  // Open file for writing ()
+  fr = f_open(&fil, filename, FA_WRITE | FA_CREATE_ALWAYS);
+  if (fr != FR_OK) {
+      printf("ERROR: Could not open file (%d)\r\n", fr);
+      while (true);
+  }
+}
+
+void write_sd_card(std::string keyDatas)
+{
+  // Write something to file
+  printf(keyDatas.c_str());
+  ret = f_printf(&fil, keyDatas.c_str());
+  if (ret < 0) {
+      printf("ERROR: Could not write to file (%d)\r\n", ret);
+      f_close(&fil);
+      while (true);
+  }
+}
+
+void close_sd_card(void)
+{
+  // Close file
+  fr = f_close(&fil);
+  if (fr != FR_OK) {
+      printf("ERROR: Could not close file (%d)\r\n", fr);
+      while (true);
+  }
+}
 //--------------------------------------------------------------------+
 // Serial USB CDC
 //--------------------------------------------------------------------+
 // echo to either Serial0 or Serial1
 // with Serial0 as all lower case, Serial1 as all upper case
-static void echo_serial_port(uint8_t itf, uint8_t buf[], uint32_t count)
-{
-  uint8_t const case_diff = 'a' - 'A';
-
-  for(uint32_t i=0; i<count; i++)
-  {
-    if (itf == 0)
-    {
-      // echo back 1st port as lower case
-      if (isupper(buf[i])) buf[i] += case_diff;
-    }
-    else
-    {
-      // echo back 2nd port as upper case
-      if (islower(buf[i])) buf[i] -= case_diff;
-    }
-
-    tud_cdc_n_write_char(itf, buf[i]);
-  }
-  tud_cdc_n_write_flush(itf);
-}
 
 static void cdc_task(void)
 {
@@ -160,17 +207,16 @@ static void cdc_task(void)
   {
     // connected() check for DTR bit
     // Most but not all terminal client set this when making connection
-    // if ( tud_cdc_n_connected(itf) )
+    if ( tud_cdc_n_connected(itf) )
     {
       if ( tud_cdc_n_available(itf) )
       {
-        uint8_t buf[64];
-
-        uint32_t count = tud_cdc_n_read(itf, buf, sizeof(buf));
-
-        // echo back to both serial ports
-        echo_serial_port(0, buf, count);
-        echo_serial_port(1, buf, count);
+        uint32_t count = tud_cdc_n_read(itf, receivedBuffer, sizeof(receivedBuffer));
+        for(uint32_t i=0; i<count; i++)
+        {
+          tud_cdc_n_write_char(itf, receivedBuffer[i]);
+        }
+        tud_cdc_n_write_flush(itf);
       }
     }
   }
@@ -188,7 +234,10 @@ void init_buttons(void)
     for (int j = 0; j < splitVectorData[i].size(); j++)
     {
       b.keyCode[j] = string_to_hid(splitVectorData[i][j]);
-      printf(splitVectorData[i][j].c_str());
+      for(int k = 0; k < splitVectorData[i][j].size(); k++)
+      {
+        printf("Char ASCII: %d", splitVectorData[i][j][k]);
+      }
       printf("\r\n");
     }
     buttonGroup.push_back(b);
@@ -205,7 +254,7 @@ void split_data(void)
 
   for (int i = 0; i < sizeof(buf); i++)
   {
-    if(buf[i] != 0)
+    if(buf[i] != 0 && buf[i] != 10)
     {
       if(buf[i] == '+')
       {
